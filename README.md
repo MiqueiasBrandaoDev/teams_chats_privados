@@ -10,6 +10,8 @@ Esta ferramenta permite:
 - ✅ Exportar **todos** os chats privados do Teams
 - ✅ Incluir conversas 1:1 e grupos privados
 - ✅ Salvar em formato **JSON** e **Excel**
+- ✅ **Baixar automaticamente TODOS os anexos** (imagens, documentos, PDFs)
+- ✅ Organizar anexos em **pastas por conversa**
 - ✅ Funcionar em **WSL/Linux** sem problemas de navegador
 - ✅ Modo **teste** para validação antes da exportação completa
 - ✅ Rate limiting automático para evitar bloqueios da API
@@ -20,6 +22,8 @@ Esta ferramenta permite:
 - **Autenticação Segura**: Device Code Flow (sem necessidade de servidor web local)
 - **Compatibilidade WSL**: Funciona perfeitamente no Windows Subsystem for Linux
 - **Exportação Completa**: Inclui metadados, anexos, reações e menções
+- **Download de Anexos**: Baixa automaticamente imagens, documentos e arquivos do SharePoint
+- **Organização Inteligente**: Cria pastas por conversa para melhor organização
 - **Formato Duplo**: JSON para dados brutos + Excel para análise
 - **Rate Limiting**: Controle automático de velocidade das requisições
 - **Modo Teste**: Validação com apenas o primeiro chat antes da exportação completa
@@ -40,11 +44,22 @@ Esta ferramenta permite:
 teams_chats_privados/
 ├── device_chat_exporter.py    # 🎯 Script principal
 ├── device_auth.py             # 🔐 Autenticação Device Code
+├── attachment_downloader.py   # 📎 Downloader standalone (opcional)
 ├── config.py                  # ⚙️ Configurações
 ├── test_device_auth.py        # 🧪 Teste de autenticação  
 ├── requirements.txt           # 📚 Dependências Python
 ├── .env                       # 🔒 Variáveis de ambiente (criar)
+├── .env.example               # 📝 Template de configuração
+├── .gitignore                 # 🚫 Arquivos ignorados pelo git
 ├── exports/                   # 📁 Pasta de saída dos arquivos
+│   ├── *.json                 # 📄 Dados brutos das conversas
+│   ├── *.xlsx                 # 📊 Planilhas organizadas
+│   └── attachments/           # 📂 TODOS os anexos baixados
+│       ├── Conversa_1/        # 💬 Anexos da conversa 1
+│       │   ├── *.pdf          # 📑 Documentos
+│       │   ├── *.jpg          # 🖼️ Imagens
+│       │   └── *.docx         # 📝 Arquivos Word
+│       └── Conversa_2/        # 💬 Anexos da conversa 2
 └── README.md                  # 📖 Esta documentação
 ```
 
@@ -218,11 +233,25 @@ $ python device_chat_exporter.py
 💾 JSON salvo: ./exports/private_chats_test_20240125_143022.json
 📊 Excel salvo: ./exports/private_chats_test_20240125_143022.xlsx
 
+📥 Iniciando download de anexos...
+✅ Baixado: documento_importante.pdf
+✅ Imagem baixada: image_0-eus-d6-9786e886c4394df8.jpg
+✅ Baixado: contrato_assinado.docx
+✅ Imagem baixada: screenshot_sistema.png
+
+📁 ANEXOS BAIXADOS:
+✅ Arquivos baixados: 15
+❌ Falhas: 0
+📂 Diretório: ./exports/attachments
+
 🎯 RESUMO FINAL
 ========================================
 💬 Total de mensagens: 42
-⏱️  Tempo total: 0:00:08.123456
+📎 Anexos baixados: 15
+❌ Falhas no download: 0
+⏱️  Tempo total: 0:00:12.456789
 📁 Arquivos salvos em: ./exports
+📂 Anexos salvos em: ./exports/attachments
 
 📊 Mensagens por tipo:
    oneOnOne: 42 mensagens
@@ -288,7 +317,7 @@ TENANT_ID=                    # ID do tenant Azure AD
 MODE=prod                     # 'test' | 'prod'
 OUTPUT_DIR=./exports          # Diretório de saída
 EXPORT_FORMAT=json            # Formato adicional
-EXPORT_ATTACHMENTS=true       # Exportar anexos
+EXPORT_ATTACHMENTS=true       # Baixar anexos automaticamente (true/false)
 MAX_MESSAGES_PER_REQUEST=50   # Limite da API (max: 50)
 ```
 
@@ -296,6 +325,27 @@ MAX_MESSAGES_PER_REQUEST=50   # Limite da API (max: 50)
 
 - **`MODE=test`**: Exporta apenas o primeiro chat (para testes)
 - **`MODE=prod`**: Exporta todos os chats (padrão)
+
+### Download de Anexos
+
+- **`EXPORT_ATTACHMENTS=true`**: Baixa automaticamente todos os anexos (padrão)
+- **`EXPORT_ATTACHMENTS=false`**: Pula o download de anexos (somente mensagens)
+
+**Tipos de anexos suportados:**
+- 📷 **Imagens**: JPG, PNG, GIF (das mensagens)
+- 📄 **Documentos**: PDF, DOC, DOCX, XLS, PPT (do SharePoint/OneDrive)
+- 📎 **Arquivos**: Qualquer arquivo compartilhado nas conversas
+
+**Organização dos anexos:**
+```
+exports/attachments/
+├── Nome_da_Conversa_1/
+│   ├── documento1.pdf
+│   └── imagem1.jpg
+└── Nome_da_Conversa_2/
+    ├── planilha.xlsx
+    └── foto.png
+```
 
 ### Rate Limiting
 
