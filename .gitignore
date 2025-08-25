@@ -160,3 +160,4 @@ logs/
 # Arquivos temporários do sistema
 *.tmp
 *.temp
+*.txt
