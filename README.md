@@ -76,7 +76,7 @@ teams_chats_privados/
 ```bash
 # Clonar o repositório
 cd sua_pasta_de_projetos
-git clone <url_do_repo> teams_chats_privados
+git clone https://github.com/MiqueiasBrandaoDev/teams_chats_privados
 cd teams_chats_privados
 
 # Criar ambiente virtual (recomendado)
