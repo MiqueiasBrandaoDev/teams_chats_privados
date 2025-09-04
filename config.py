@@ -10,7 +10,7 @@ MODE = os.getenv('MODE', 'prod').lower()  # 'test' ou 'prod'
 OUTPUT_DIR = os.getenv('OUTPUT_DIR', './exports')
 EXPORT_FORMAT = os.getenv('EXPORT_FORMAT', 'json')
 EXPORT_ATTACHMENTS = os.getenv('EXPORT_ATTACHMENTS', 'true').lower() == 'true'
-EXPORT_ATTACHMENTS_MODE = os.getenv('EXPORT_ATTACHMENTS_MODE', 'download').lower()  # 'download' ou 'csv'
+EXPORT_ATTACHMENTS_MODE = os.getenv('EXPORT_ATTACHMENTS_MODE', 'download').lower()  # 'download', 'csv', ou 'both'
 MAX_MESSAGES_PER_REQUEST = int(os.getenv('MAX_MESSAGES_PER_REQUEST', '50'))  # Limite da API para chats
 
 GRAPH_ENDPOINT = 'https://graph.microsoft.com/v1.0'
@@ -21,5 +21,7 @@ SCOPES = [
     'https://graph.microsoft.com/Chat.Read',
     'https://graph.microsoft.com/Chat.ReadBasic',
     'https://graph.microsoft.com/User.Read',
+    'https://graph.microsoft.com/Files.Read.All',
+    'https://graph.microsoft.com/Sites.Read.All',
     'https://graph.microsoft.com/offline_access'
 ]

@@ -211,19 +211,28 @@ class DeviceChatExporter:
             sanitized = name[:190] + ext
         return sanitized
     
-    def download_file(self, url, filename, chat_id=None):
+    def extract_owner_from_url(self, url):
+        """Extrair o dono do arquivo da URL do SharePoint"""
+        if not url:
+            return 'desconhecido'
+        
+        # Procurar padrão: personal/usuario_dominio_com_br/
+        personal_match = re.search(r'personal/([^/]+)/', url)
+        if personal_match:
+            user_encoded = personal_match.group(1)
+            # Decodificar: ti01_camozziconsultoria_com_br -> ti01@camozziconsultoria.com.br
+            user_decoded = user_encoded.replace('_', '.').replace('.', '@', 1)
+            return user_decoded
+        
+        return 'sistema'
+    
+    def download_file(self, url, filename, attachments_dir):
         """Baixar arquivo de uma URL"""
         try:
             response = requests.get(url, headers=self.headers, stream=True)
             
             if response.status_code == 200:
-                if chat_id:
-                    chat_dir = os.path.join(self.attachments_dir, self.sanitize_filename(chat_id))
-                    if not os.path.exists(chat_dir):
-                        os.makedirs(chat_dir)
-                    filepath = os.path.join(chat_dir, self.sanitize_filename(filename))
-                else:
-                    filepath = os.path.join(self.attachments_dir, self.sanitize_filename(filename))
+                filepath = os.path.join(attachments_dir, self.sanitize_filename(filename))
                 
                 counter = 1
                 original_filepath = filepath
@@ -238,9 +247,15 @@ class DeviceChatExporter:
                 
                 return True, filepath
             else:
+                print(f"         ❌ ERRO HTTP {response.status_code} para {filename}")
+                print(f"         📄 URL: {url[:100]}...")
+                if response.text:
+                    print(f"         📝 Resposta: {response.text[:200]}")
                 return False, None
                 
         except Exception as e:
+            print(f"         ❌ EXCEÇÃO para {filename}: {str(e)}")
+            print(f"         📄 URL: {url[:100]}...")
             return False, None
     
     def extract_hosted_content_urls(self, message_content):
@@ -262,69 +277,93 @@ class DeviceChatExporter:
         
         return urls
     
-    def process_sharepoint_attachment(self, attachment, chat_id):
+    def process_sharepoint_attachment(self, attachment, attachments_dir):
         """Processar anexos do SharePoint"""
         content_url = attachment.get('contentUrl', '')
-        if content_url and 'sharepoint.com' in content_url:
+        if content_url:
             parsed_url = urlparse(content_url)
             filename = unquote(os.path.basename(parsed_url.path))
             
-            if not filename or filename == '/':
-                filename = f"sharepoint_file_{attachment['id']}.pdf"
+            if not filename or filename == '/' or filename == '':
+                attachment_name = attachment.get('name', 'arquivo_sem_nome')
+                filename = f"{attachment_name}_{attachment.get('id', 'unknown')}"
+                if not filename.endswith('.pdf'):
+                    filename += '.pdf'
             
-            success, filepath = self.download_file(content_url, filename, chat_id)
+            # Tentar 1: Via Graph API como item compartilhado (PRIMEIRO - funciona melhor)
+            if 'sharepoint.com' in content_url:
+                print(f"         🔄 Tentando via Graph API shared items...")
+                import base64
+                encoded_url = base64.b64encode(content_url.encode()).decode().rstrip('=')
+                shared_url = f"{config.GRAPH_ENDPOINT}/shares/u!{encoded_url}/driveItem/content"
+                success, filepath = self.download_file(shared_url, filename, attachments_dir)
+            else:
+                success = False
             
             if not success:
-                graph_url = f"{config.GRAPH_ENDPOINT}/me/drive/root:{parsed_url.path}:/content"
-                success, filepath = self.download_file(graph_url, filename, chat_id)
+                print(f"         🔄 Tentando URL direta...")
+                # Tentar 2: URL direta
+                success, filepath = self.download_file(content_url, filename, attachments_dir)
+                
+                if not success and 'sharepoint.com' in content_url:
+                    print(f"         🔄 Tentando via Graph API me/drive...")
+                    # Tentar 3: Via Graph API tradicional
+                    graph_url = f"{config.GRAPH_ENDPOINT}/me/drive/root:{parsed_url.path}:/content"
+                    success, filepath = self.download_file(graph_url, filename, attachments_dir)
             
             return success, filepath
+        else:
+            print(f"         ❌ Anexo sem contentUrl: {attachment}")
         
         return False, None
     
-    def download_attachments_from_messages(self, messages):
-        """Baixar todos os anexos das mensagens"""
-        print(f"\n📥 Iniciando download de anexos...")
-        
-        total_downloaded = 0
-        total_failed = 0
+    def download_chat_attachments(self, messages, attachments_dir):
+        """Baixar anexos de um chat específico"""
+        downloaded = 0
+        failed = 0
         
         for message in messages:
-            chat_info = message.get('chatInfo', {})
-            chat_id = chat_info.get('topic', f"chat_{chat_info.get('id', 'unknown')}")
-            
-            # 1. Processar anexos estruturados
+            # 1. Processar anexos estruturados (SharePoint files)
             attachments = message.get('attachments', [])
             for attachment in attachments:
                 content_type = attachment.get('contentType', '')
                 
                 if content_type == 'reference':
-                    success, filepath = self.process_sharepoint_attachment(attachment, chat_id)
+                    success, filepath = self.process_sharepoint_attachment(attachment, attachments_dir)
                     if success:
-                        total_downloaded += 1
-                        print(f"✅ Baixado: {os.path.basename(filepath)}")
+                        downloaded += 1
+                        print(f"         ✅ Baixado: {os.path.basename(filepath)}")
                     else:
-                        total_failed += 1
+                        failed += 1
+                        print(f"         ❌ Falha ao baixar anexo SharePoint: {attachment.get('name', 'sem nome')}")
             
-            # 2. Extrair imagens do conteúdo HTML
+            # 2. Procurar por URLs de arquivo no conteúdo da mensagem
             body_content = message.get('body', {}).get('content', '')
             if body_content:
-                image_urls = self.extract_hosted_content_urls(body_content)
+                # Procurar por URLs que apontam para arquivos reais (não imagens)
+                file_patterns = [
+                    r'https://[^"]*\.(?:pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|txt)',
+                    r'https://[^"]*sharepoint[^"]*',
+                    r'https://[^"]*onedrive[^"]*'
+                ]
                 
-                for url, filename in image_urls:
-                    success, filepath = self.download_file(url, filename, chat_id)
-                    if success:
-                        total_downloaded += 1
-                        print(f"✅ Imagem baixada: {os.path.basename(filepath)}")
-                    else:
-                        total_failed += 1
+                for pattern in file_patterns:
+                    file_matches = re.findall(pattern, body_content, re.IGNORECASE)
+                    for match in file_matches:
+                        if 'hostedContents' not in match:  # Evitar imagens incorporadas
+                            filename_from_url = unquote(os.path.basename(urlparse(match).path))
+                            if not filename_from_url:
+                                filename_from_url = 'arquivo_extraido.file'
+                                
+                            success, filepath = self.download_file(match, filename_from_url, attachments_dir)
+                            if success:
+                                downloaded += 1
+                                print(f"         ✅ URL baixada: {os.path.basename(filepath)}")
+                            else:
+                                failed += 1
+                                print(f"         ❌ Falha ao baixar URL: {filename_from_url}")
         
-        print(f"\n📁 ANEXOS BAIXADOS:")
-        print(f"✅ Arquivos baixados: {total_downloaded}")
-        print(f"❌ Falhas: {total_failed}")
-        print(f"📂 Diretório: {self.attachments_dir}")
-        
-        return total_downloaded, total_failed
+        return downloaded, failed
     
     def extract_chat_attachments_info(self, messages):
         """Extrair informações dos anexos de um chat específico para CSV"""
@@ -359,7 +398,7 @@ class DeviceChatExporter:
                     'content_url': attachment.get('contentUrl', ''),
                     'web_url': attachment.get('contentUrl', ''),
                     'size_bytes': attachment.get('size', ''),
-                    'observacoes': f"Anexo estruturado - {attachment.get('contentType', 'tipo desconhecido')}"
+                    'observacoes': f"Anexo estruturado - {attachment.get('contentType', 'tipo desconhecido')} - Dono: {self.extract_owner_from_url(attachment.get('contentUrl', ''))}"
                 }
                 attachments_info.append(attachment_info)
             
@@ -461,8 +500,12 @@ class DeviceChatExporter:
         if config.EXPORT_ATTACHMENTS:
             if config.EXPORT_ATTACHMENTS_MODE == 'csv':
                 print("📋 ANEXOS: Modo CSV (lista de links para download manual)")
-            else:
+            elif config.EXPORT_ATTACHMENTS_MODE == 'download':
                 print("📥 ANEXOS: Modo download automático")
+            elif config.EXPORT_ATTACHMENTS_MODE == 'both':
+                print("📋📥 ANEXOS: Modo completo (CSV + download automático)")
+            else:
+                print("📥 ANEXOS: Modo download automático (padrão)")
         else:
             print("❌ ANEXOS: Desabilitado")
             
@@ -521,13 +564,25 @@ class DeviceChatExporter:
                 self.save_chat_to_excel(chat_messages, chat_dir, chat_display)
                 
                 # Processar anexos se habilitado
-                if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv':
+                if config.EXPORT_ATTACHMENTS:
                     attachments_info = self.extract_chat_attachments_info(chat_messages)
-                    if attachments_info:
+                    downloaded_count = 0
+                    failed_count = 0
+                    
+                    # Salvar CSV com informações dos anexos (sempre que há anexos)
+                    if attachments_info and config.EXPORT_ATTACHMENTS_MODE in ['csv', 'both']:
                         self.save_chat_attachments_to_csv(attachments_info, attachments_dir, chat_display)
+                    
+                    # Fazer download dos anexos se modo download ou both
+                    if config.EXPORT_ATTACHMENTS_MODE in ['download', 'both']:
+                        downloaded_count, failed_count = self.download_chat_attachments(chat_messages, attachments_dir)
+                    
+                    if attachments_info:
                         total_attachments += len(attachments_info)
+                        if downloaded_count > 0:
+                            print(f"           📥 {downloaded_count} arquivos baixados, {failed_count} falhas")
                     else:
-                        print(f"     ℹ️  Sem anexos")
+                        print(f"           ℹ️  Sem anexos")
                 
                 total_messages += len(chat_messages)
                 exported_chats += 1
@@ -549,9 +604,14 @@ class DeviceChatExporter:
         print(f"📨 Conversas exportadas: {exported_chats:,}")
         print(f"💬 Total de mensagens: {total_messages:,}")
         
-        if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv':
+        if config.EXPORT_ATTACHMENTS and total_attachments > 0:
             print(f"📋 Total de anexos catalogados: {total_attachments:,}")
-            print(f"ℹ️  Use os CSVs nas pastas para baixar anexos manualmente")
+            if config.EXPORT_ATTACHMENTS_MODE == 'csv':
+                print(f"ℹ️  Use os CSVs nas pastas para baixar anexos manualmente")
+            elif config.EXPORT_ATTACHMENTS_MODE == 'download':
+                print(f"ℹ️  Arquivos baixados automaticamente nas pastas attachments/")
+            elif config.EXPORT_ATTACHMENTS_MODE == 'both':
+                print(f"ℹ️  CSVs criados + arquivos baixados automaticamente")
         
         print(f"⏱️  Tempo total: {duration}")
         print(f"📁 Estrutura criada em: {self.user_output_dir}")
@@ -559,15 +619,24 @@ class DeviceChatExporter:
         print(f"   {self.user_email}/")
         print(f"   ├── [conversa1]/")
         print(f"   │   ├── conversa1.xlsx")
-        if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv':
-            print(f"   │   └── attachments/anexos_conversa1.csv")
+        if config.EXPORT_ATTACHMENTS:
+            if config.EXPORT_ATTACHMENTS_MODE in ['csv', 'both']:
+                print(f"   │   └── attachments/")
+                print(f"   │       ├── anexos_conversa1.csv")
+                if config.EXPORT_ATTACHMENTS_MODE == 'both':
+                    print(f"   │       ├── documento1.pdf")
+                    print(f"   │       └── arquivo2.xlsx")
+            elif config.EXPORT_ATTACHMENTS_MODE == 'download':
+                print(f"   │   └── attachments/")
+                print(f"   │       ├── documento1.pdf")
+                print(f"   │       └── arquivo2.xlsx")
         print(f"   └── [conversa2]/...")
         
         # Calcular estatísticas dos chats exportados
         if exported_chats > 0:
             print(f"\n📊 Estatísticas:")
             print(f"   Média de mensagens por conversa: {total_messages/exported_chats:.0f}")
-            if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv' and total_attachments > 0:
+            if config.EXPORT_ATTACHMENTS and total_attachments > 0:
                 print(f"   Média de anexos por conversa: {total_attachments/exported_chats:.0f}")
 
 def main():
