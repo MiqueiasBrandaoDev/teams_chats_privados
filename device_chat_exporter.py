@@ -8,6 +8,7 @@ from datetime import datetime
 import time
 import re
 from urllib.parse import urlparse, unquote
+import csv
 
 from device_auth import DeviceCodeAuthenticator
 import config
@@ -16,15 +17,9 @@ class DeviceChatExporter:
     def __init__(self):
         self.authenticator = DeviceCodeAuthenticator()
         self.headers = self.authenticator.get_headers()
-        self.output_dir = config.OUTPUT_DIR
-        self.attachments_dir = os.path.join(self.output_dir, "attachments")
-        self.ensure_output_directory()
-        
-    def ensure_output_directory(self):
-        if not os.path.exists(self.output_dir):
-            os.makedirs(self.output_dir)
-        if not os.path.exists(self.attachments_dir):
-            os.makedirs(self.attachments_dir)
+        self.base_output_dir = config.OUTPUT_DIR
+        self.user_email = None
+        self.user_output_dir = None
     
     def make_request(self, url, params=None):
         try:
@@ -51,6 +46,42 @@ class DeviceChatExporter:
                 print(f"   Status: {e.response.status_code}")
                 print(f"   Resposta: {e.response.text[:200]}")
             return None
+    
+    def get_user_info(self):
+        """Obter informações do usuário conectado"""
+        print("👤 Obtendo informações do usuário...")
+        url = f"{config.GRAPH_ENDPOINT}/me"
+        
+        data = self.make_request(url)
+        if data:
+            self.user_email = data.get('userPrincipalName', data.get('mail', 'usuario_desconhecido'))
+            display_name = data.get('displayName', 'Usuário')
+            print(f"✅ Conectado como: {display_name} ({self.user_email})")
+            
+            # Configurar diretório do usuário
+            safe_email = re.sub(r'[<>:"/\\|?*]', '_', self.user_email)
+            self.user_output_dir = os.path.join(self.base_output_dir, safe_email)
+            
+            if not os.path.exists(self.user_output_dir):
+                os.makedirs(self.user_output_dir)
+                
+            return True
+        else:
+            print("❌ Não foi possível obter informações do usuário")
+            return False
+    
+    def ensure_chat_directory(self, chat_display):
+        """Criar diretório para uma conversa específica"""
+        safe_chat_name = self.sanitize_filename(chat_display)
+        chat_dir = os.path.join(self.user_output_dir, safe_chat_name)
+        attachments_dir = os.path.join(chat_dir, "attachments")
+        
+        if not os.path.exists(chat_dir):
+            os.makedirs(chat_dir)
+        if not os.path.exists(attachments_dir):
+            os.makedirs(attachments_dir)
+            
+        return chat_dir, attachments_dir
     
     def get_my_chats(self):
         print("💬 Obtendo lista de chats privados...")
@@ -123,60 +154,11 @@ class DeviceChatExporter:
         else:
             return f"{chat_type}: {topic}"
     
-    def export_private_chats(self):
-        print("\n📱 Iniciando exportação de chats privados...")
-        chats = self.get_my_chats()
-        
-        if not chats:
-            print("⚠️  Nenhum chat encontrado")
-            return []
-        
-        # Modo teste: apenas primeira conversa
-        if config.MODE == 'test':
-            chats = chats[:1]
-            print(f"🧪 MODO TESTE: Processando apenas 1 conversa (primeira)")
-        else:
-            print(f"🚀 MODO PRODUÇÃO: Processando todas as {len(chats)} conversas")
-        
-        all_messages = []
-        
-        print(f"\n🔄 Exportando {len(chats)} conversas...")
-        print("=" * 60)
-        
-        for i, chat in enumerate(chats, 1):
-            chat_display = self.format_chat_info(chat)
-            
-            # Mostrar progresso atual
-            progress_percent = (i / len(chats)) * 100
-            print(f"\n[{i:2d}/{len(chats)}] ({progress_percent:5.1f}%) 📨 {chat_display}")
-            
-            # Exportar mensagens do chat
-            chat_messages = self.get_messages_from_chat(chat['id'], chat)
-            all_messages.extend(chat_messages)
-            
-            # Resultado da exportação
-            if chat_messages:
-                print(f"           ✅ {len(chat_messages):4d} mensagens | Total acumulado: {len(all_messages):5d}")
-            else:
-                print(f"           ℹ️   0 mensagens | Total acumulado: {len(all_messages):5d}")
-            
-            # Pequena pausa para rate limiting
-            time.sleep(0.2)
-        
-        print("\n" + "=" * 60)
-        print(f"🎉 Exportação concluída! Total: {len(all_messages)} mensagens")
-        
-        return all_messages
     
-    def save_to_json(self, data, filename):
-        filepath = os.path.join(self.output_dir, f"{filename}.json")
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
-        print(f"💾 JSON salvo: {filepath}")
-    
-    def save_to_excel(self, messages, filename):
+    def save_chat_to_excel(self, messages, chat_dir, chat_display):
+        """Salvar mensagens de um chat específico em Excel"""
         if not messages:
-            return
+            return None
             
         processed_messages = []
         for msg in messages:
@@ -215,9 +197,11 @@ class DeviceChatExporter:
             processed_messages.append(processed_msg)
         
         df = pd.DataFrame(processed_messages)
-        filepath = os.path.join(self.output_dir, f"{filename}.xlsx")
+        safe_filename = self.sanitize_filename(chat_display)
+        filepath = os.path.join(chat_dir, f"{safe_filename}.xlsx")
         df.to_excel(filepath, index=False)
-        print(f"📊 Excel salvo: {filepath}")
+        print(f"📊 Excel salvo: {os.path.basename(filepath)}")
+        return filepath
     
     def sanitize_filename(self, filename):
         """Remove caracteres inválidos do nome do arquivo"""
@@ -342,6 +326,127 @@ class DeviceChatExporter:
         
         return total_downloaded, total_failed
     
+    def extract_chat_attachments_info(self, messages):
+        """Extrair informações dos anexos de um chat específico para CSV"""
+        attachments_info = []
+        
+        for message in messages:
+            chat_info = message.get('chatInfo', {})
+            chat_display = self.format_chat_info(chat_info)
+            message_id = message.get('id', '')
+            message_date = message.get('createdDateTime', '')
+            from_info = message.get('from')
+            if from_info and isinstance(from_info, dict):
+                user_info = from_info.get('user')
+                if user_info and isinstance(user_info, dict):
+                    from_user = user_info.get('displayName', 'Usuário desconhecido')
+                else:
+                    from_user = 'Usuário desconhecido'
+            else:
+                from_user = 'Usuário desconhecido'
+            
+            # 1. Anexos estruturados (arquivos do SharePoint, etc.)
+            attachments = message.get('attachments', [])
+            for idx, attachment in enumerate(attachments):
+                attachment_info = {
+                    'tipo': 'attachment',
+                    'message_id': message_id,
+                    'message_date': message_date,
+                    'from_user': from_user,
+                    'attachment_id': attachment.get('id', f'att_{idx}'),
+                    'attachment_name': attachment.get('name', 'Sem nome'),
+                    'content_type': attachment.get('contentType', ''),
+                    'content_url': attachment.get('contentUrl', ''),
+                    'web_url': attachment.get('contentUrl', ''),
+                    'size_bytes': attachment.get('size', ''),
+                    'observacoes': f"Anexo estruturado - {attachment.get('contentType', 'tipo desconhecido')}"
+                }
+                attachments_info.append(attachment_info)
+            
+            # 2. Imagens incorporadas (hostedContents)
+            body_content = message.get('body', {}).get('content', '')
+            if body_content:
+                image_urls = self.extract_hosted_content_urls(body_content)
+                
+                for url, filename in image_urls:
+                    attachment_info = {
+                        'tipo': 'hosted_image',
+                        'message_id': message_id,
+                        'message_date': message_date,
+                        'from_user': from_user,
+                        'attachment_id': filename,
+                        'attachment_name': filename,
+                        'content_type': 'image',
+                        'content_url': url,
+                        'web_url': url,
+                        'size_bytes': '',
+                        'observacoes': 'Imagem incorporada na mensagem'
+                    }
+                    attachments_info.append(attachment_info)
+                
+                # 3. Outros links de arquivo no conteúdo (opcional)
+                # Procurar por outros padrões de URL que possam ser arquivos
+                file_patterns = [
+                    r'https://[^"]*\.(?:pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|txt)',
+                    r'https://[^"]*sharepoint[^"]*',
+                    r'https://[^"]*onedrive[^"]*'
+                ]
+                
+                for pattern in file_patterns:
+                    file_matches = re.findall(pattern, body_content, re.IGNORECASE)
+                    for match in file_matches:
+                        if 'hostedContents' not in match:  # Evitar duplicatas das imagens já processadas
+                            filename_from_url = unquote(os.path.basename(urlparse(match).path))
+                            if not filename_from_url:
+                                filename_from_url = 'arquivo_extraido.file'
+                                
+                            attachment_info = {
+                                'tipo': 'url_file',
+                                'message_id': message_id,
+                                'message_date': message_date,
+                                'from_user': from_user,
+                                'attachment_id': f'url_{len(attachments_info)}',
+                                'attachment_name': filename_from_url,
+                                'content_type': 'file_url',
+                                'content_url': match,
+                                'web_url': match,
+                                'size_bytes': '',
+                                'observacoes': 'URL de arquivo encontrada no conteúdo da mensagem'
+                            }
+                            attachments_info.append(attachment_info)
+        
+        return attachments_info
+    
+    def save_chat_attachments_to_csv(self, attachments_info, attachments_dir, chat_display):
+        """Salvar informações dos anexos de um chat específico em CSV"""
+        if not attachments_info:
+            return None
+        
+        safe_filename = self.sanitize_filename(chat_display)
+        filepath = os.path.join(attachments_dir, f"anexos_{safe_filename}.csv")
+        
+        fieldnames = [
+            'tipo',
+            'message_date',
+            'from_user',
+            'attachment_name',
+            'content_type',
+            'content_url',
+            'web_url',
+            'size_bytes',
+            'observacoes',
+            'message_id',
+            'attachment_id'
+        ]
+        
+        with open(filepath, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(attachments_info)
+        
+        print(f"📋 CSV anexos: {os.path.basename(filepath)} ({len(attachments_info)} itens)")
+        return filepath
+    
     def export_all(self):
         print("🚀 Exportador de Chats Privados - Device Code")
         print("👤 Usando autenticação device code")
@@ -351,8 +456,17 @@ class DeviceChatExporter:
             print("🧪 MODO: TESTE (apenas primeira conversa)")
         else:
             print("🚀 MODO: PRODUÇÃO (todas as conversas)")
+        
+        # Mostrar modo de anexos
+        if config.EXPORT_ATTACHMENTS:
+            if config.EXPORT_ATTACHMENTS_MODE == 'csv':
+                print("📋 ANEXOS: Modo CSV (lista de links para download manual)")
+            else:
+                print("📥 ANEXOS: Modo download automático")
+        else:
+            print("❌ ANEXOS: Desabilitado")
             
-        print(f"📁 Diretório de saída: {self.output_dir}")
+        print(f"📁 Diretório base: {self.base_output_dir}")
         
         start_time = datetime.now()
         
@@ -364,50 +478,97 @@ class DeviceChatExporter:
         
         print(f"✅ {auth_message}")
         
-        # Exportar chats (não duplicar - export_private_chats já chama get_my_chats)
-        messages = self.export_private_chats()
-        
-        if not messages:
-            print("\n⚠️  Nenhuma mensagem encontrada para exportar")
+        # Obter informações do usuário
+        if not self.get_user_info():
             return
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Obter lista de chats
+        chats = self.get_my_chats()
         
-        # Salvar dados com sufixo do modo
-        mode_suffix = "test" if config.MODE == 'test' else "prod"
-        self.save_to_json(messages, f"private_chats_{mode_suffix}_{timestamp}")
-        self.save_to_excel(messages, f"private_chats_{mode_suffix}_{timestamp}")
+        if not chats:
+            print("⚠️  Nenhum chat encontrado")
+            return
         
-        # Baixar anexos automaticamente
-        if config.EXPORT_ATTACHMENTS:
-            downloaded, failed = self.download_attachments_from_messages(messages)
+        # Modo teste: apenas primeira conversa
+        if config.MODE == 'test':
+            chats = chats[:1]
+            print(f"🧪 MODO TESTE: Processando apenas 1 conversa (primeira)")
         else:
-            print("\n⚠️  Download de anexos desabilitado (EXPORT_ATTACHMENTS=false)")
-            downloaded, failed = 0, 0
+            print(f"🚀 MODO PRODUÇÃO: Processando todas as {len(chats)} conversas")
+        
+        print(f"\n🔄 Exportando {len(chats)} conversas...")
+        print("=" * 60)
+        
+        total_messages = 0
+        total_attachments = 0
+        exported_chats = 0
+        
+        for i, chat in enumerate(chats, 1):
+            chat_display = self.format_chat_info(chat)
+            
+            # Mostrar progresso atual
+            progress_percent = (i / len(chats)) * 100
+            print(f"\n[{i:2d}/{len(chats)}] ({progress_percent:5.1f}%) 📨 {chat_display}")
+            
+            # Criar diretórios para este chat
+            chat_dir, attachments_dir = self.ensure_chat_directory(chat_display)
+            
+            # Exportar mensagens do chat
+            chat_messages = self.get_messages_from_chat(chat['id'], chat)
+            
+            if chat_messages:
+                # Salvar Excel do chat
+                self.save_chat_to_excel(chat_messages, chat_dir, chat_display)
+                
+                # Processar anexos se habilitado
+                if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv':
+                    attachments_info = self.extract_chat_attachments_info(chat_messages)
+                    if attachments_info:
+                        self.save_chat_attachments_to_csv(attachments_info, attachments_dir, chat_display)
+                        total_attachments += len(attachments_info)
+                    else:
+                        print(f"     ℹ️  Sem anexos")
+                
+                total_messages += len(chat_messages)
+                exported_chats += 1
+                print(f"           ✅ {len(chat_messages):4d} mensagens exportadas")
+            else:
+                print(f"           ℹ️   0 mensagens encontradas")
+            
+            # Pequena pausa para rate limiting
+            time.sleep(0.2)
         
         end_time = datetime.now()
         duration = end_time - start_time
         
+        print("\n" + "=" * 60)
+        print(f"🎉 Exportação concluída!")
         print(f"\n🎯 RESUMO FINAL")
         print("=" * 40)
-        print(f"💬 Total de mensagens: {len(messages):,}")
-        if config.EXPORT_ATTACHMENTS:
-            print(f"📎 Anexos baixados: {downloaded:,}")
-            print(f"❌ Falhas no download: {failed:,}")
+        print(f"👤 Usuário: {self.user_email}")
+        print(f"📨 Conversas exportadas: {exported_chats:,}")
+        print(f"💬 Total de mensagens: {total_messages:,}")
+        
+        if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv':
+            print(f"📋 Total de anexos catalogados: {total_attachments:,}")
+            print(f"ℹ️  Use os CSVs nas pastas para baixar anexos manualmente")
+        
         print(f"⏱️  Tempo total: {duration}")
-        print(f"📁 Arquivos salvos em: {self.output_dir}")
-        if config.EXPORT_ATTACHMENTS and downloaded > 0:
-            print(f"📂 Anexos salvos em: {self.attachments_dir}")
+        print(f"📁 Estrutura criada em: {self.user_output_dir}")
+        print(f"\n📂 Estrutura:")
+        print(f"   {self.user_email}/")
+        print(f"   ├── [conversa1]/")
+        print(f"   │   ├── conversa1.xlsx")
+        if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv':
+            print(f"   │   └── attachments/anexos_conversa1.csv")
+        print(f"   └── [conversa2]/...")
         
         # Calcular estatísticas dos chats exportados
-        chat_types = {}
-        for msg in messages:
-            chat_type = msg.get('chatInfo', {}).get('chatType', 'unknown')
-            chat_types[chat_type] = chat_types.get(chat_type, 0) + 1
-        
-        print(f"\n📊 Mensagens por tipo:")
-        for chat_type, count in chat_types.items():
-            print(f"   {chat_type}: {count:,} mensagens")
+        if exported_chats > 0:
+            print(f"\n📊 Estatísticas:")
+            print(f"   Média de mensagens por conversa: {total_messages/exported_chats:.0f}")
+            if config.EXPORT_ATTACHMENTS and config.EXPORT_ATTACHMENTS_MODE == 'csv' and total_attachments > 0:
+                print(f"   Média de anexos por conversa: {total_attachments/exported_chats:.0f}")
 
 def main():
     try:
