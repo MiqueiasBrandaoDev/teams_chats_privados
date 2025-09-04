@@ -456,13 +456,13 @@ class DeviceChatExporter:
         
         return attachments_info
     
-    def save_chat_attachments_to_csv(self, attachments_info, attachments_dir, chat_display):
+    def save_chat_attachments_to_csv(self, attachments_info, chat_dir, chat_display):
         """Salvar informações dos anexos de um chat específico em CSV"""
         if not attachments_info:
             return None
         
         safe_filename = self.sanitize_filename(chat_display)
-        filepath = os.path.join(attachments_dir, f"anexos_{safe_filename}.csv")
+        filepath = os.path.join(chat_dir, f"anexos_{safe_filename}.csv")
         
         fieldnames = [
             'tipo',
@@ -571,7 +571,7 @@ class DeviceChatExporter:
                     
                     # Salvar CSV com informações dos anexos (sempre que há anexos)
                     if attachments_info and config.EXPORT_ATTACHMENTS_MODE in ['csv', 'both']:
-                        self.save_chat_attachments_to_csv(attachments_info, attachments_dir, chat_display)
+                        self.save_chat_attachments_to_csv(attachments_info, chat_dir, chat_display)
                     
                     # Fazer download dos anexos se modo download ou both
                     if config.EXPORT_ATTACHMENTS_MODE in ['download', 'both']:
@@ -621,9 +621,9 @@ class DeviceChatExporter:
         print(f"   │   ├── conversa1.xlsx")
         if config.EXPORT_ATTACHMENTS:
             if config.EXPORT_ATTACHMENTS_MODE in ['csv', 'both']:
-                print(f"   │   └── attachments/")
-                print(f"   │       ├── anexos_conversa1.csv")
+                print(f"   │   ├── anexos_conversa1.csv")
                 if config.EXPORT_ATTACHMENTS_MODE == 'both':
+                    print(f"   │   └── attachments/")
                     print(f"   │       ├── documento1.pdf")
                     print(f"   │       └── arquivo2.xlsx")
             elif config.EXPORT_ATTACHMENTS_MODE == 'download':
